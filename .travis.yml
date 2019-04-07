@@ -1,0 +1,41 @@
+language: julia
+os:
+  - linux
+julia:
+  - 1.0
+notifications:
+  email: false
+git:
+  depth: 99999999
+cache:
+  directories:
+    - downloads
+env:
+  global:
+    - BINARYBUILDER_DOWNLOADS_CACHE=downloads
+    - BINARYBUILDER_AUTOMATIC_APPLE=true
+sudo: required
+
+# Before anything else, get the latest versions of things
+before_script:
+  - cd ../..
+  - julia -e 'using Pkg; Pkg.add("BinaryProvider")'
+  - julia -e 'using Pkg; Pkg.add(PackageSpec(name="BinaryBuilder", rev="master"))'
+
+script:
+  - julia --color=yes JuliaInterop/libcxxwrap-julia/.ci/build_tarballs.jl
+  - cd JuliaInterop/libcxxwrap-julia/testlib-builder
+  - julia --color=yes build_tarballs.jl
+  - cd ../../..
+  - ls -l products
+
+deploy:
+  provider: releases
+  api_key:
+    secure: xCut0MxLHQ18ZbUytcqx6omUyMxJzDKE4ife6620mmF/xz5dsbc2wJOloUKFG1ACvT69ktb0oFhJltMwECGXU5lbUoRXcWnScaIOjDHsx9Iw4BaYxjF+S97UGWSdg40xLFXiw4w1w/oRLAfHwv9mOSfEpn1oCvJ4tufsXTcY3stTEYYSePlZOCz/0jDMl8qTW+Y2SVraGxErkRr46UMcTYqlhz7p7/n4vcb/fNdWLqB8B5OYKSmZeSZ2Yqf7jNl9L4L416trllIv2NlFo1iMzfZF5MavwnrSL1xRPmkqZrpKFR0oRGFeSFoaVROxbEjObAUYv6kR4WR/VsdA5UrKpZ2K5aSsoggaKItv0JFQXDWjTyHJ2q5MKSC0WfwRErD/AqYBKNQYHCxxjKeRp+MGsIJfHjipy1oThGjWyCkqQZbtDlrKhCCcZCDWt6A/jaAlkkiFllEtn31dBHbBWphcY2JfP50rLIAA6O4F3pp2olQTFPHZ1s9bZdJcvCqWvlp0905lzF1wWMEq+FlFLCdEiiIJcin/LGiNUooSR4GmVqCa0WIbDrjBlpISTccDr5/r83JgbNRLDFcVx4WnfivXmgU1hGZXfG+TN1z413+EA35y89jZdCtx6Dl4NlHvl4orz8i5H0NrHrYOUzqtJQw28ImgKhZ/EbOENN1p4PBYEu8=
+  file_glob: true
+  file: products/*
+  skip_cleanup: true
+  on:
+    repo: JuliaInterop/libcxxwrap-julia
+    tags: true
