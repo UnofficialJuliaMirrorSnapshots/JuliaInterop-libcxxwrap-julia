@@ -41,7 +41,7 @@ Module::Module(jl_module_t* jmod) :
 {
 }
 
-int_t Module::store_pointer(void *ptr)
+cxxint_t Module::store_pointer(void *ptr)
 {
   assert(ptr != nullptr);
   m_pointer_array.push_back(ptr);
@@ -136,15 +136,12 @@ JLCXX_API jl_value_t* julia_type(const std::string& name, const std::string& mod
       continue;
     }
 
-    jl_value_t* gval = jl_get_global(mod, jl_symbol(name.c_str()));
-#if JULIA_VERSION_MAJOR == 0 && JULIA_VERSION_MINOR < 6
-    if(gval != nullptr && (jl_is_datatype(gval) || jl_is_typector(gval)))
-#else
-    if(gval != nullptr && (jl_is_datatype(gval) || jl_is_unionall(gval)))
-#endif
+    jl_value_t* gval = julia_type(name, mod);
+    if(gval != nullptr)
     {
       return gval;
     }
+    gval = jl_get_global(mod, jl_symbol(name.c_str()));
     if(gval != nullptr)
     {
       found_type = julia_type_name(jl_typeof(gval));
@@ -159,6 +156,16 @@ JLCXX_API jl_value_t* julia_type(const std::string& name, const std::string& mod
     }
   }
   throw std::runtime_error(errmsg);
+}
+
+JLCXX_API jl_value_t* julia_type(const std::string& name, jl_module_t* mod)
+{
+  jl_value_t* gval = jl_get_global(mod, jl_symbol(name.c_str()));
+  if(gval != nullptr && (jl_is_datatype(gval) || jl_is_unionall(gval)))
+  {
+    return gval;
+  }
+  return nullptr;
 }
 
 InitHooks& InitHooks::instance()
@@ -193,18 +200,18 @@ JLCXX_API jl_value_t* apply_type(jl_value_t* tc, jl_svec_t* params)
 #endif
 }
 
-jl_value_t* ConvertToJulia<std::wstring, false, false, false>::operator()(const std::wstring& str) const
-{
-  static const JuliaFunction wstring_to_julia("wstring_to_julia", "CxxWrap");
-  return wstring_to_julia(str.c_str(), static_cast<int_t>(str.size()));
-}
+// jl_value_t* ConvertToJulia<std::wstring, false, false, false>::operator()(const std::wstring& str) const
+// {
+//   static const JuliaFunction wstring_to_julia("wstring_to_julia", "CxxWrap");
+//   return wstring_to_julia(str.c_str(), static_cast<cxxint_t>(str.size()));
+// }
 
-std::wstring ConvertToCpp<std::wstring, false, false, false>::operator()(jl_value_t* jstr) const
-{
-  static const JuliaFunction wstring_to_cpp("wstring_to_cpp", "CxxWrap");
-  ArrayRef<wchar_t> arr((jl_array_t*)wstring_to_cpp(jstr));
-  return std::wstring(arr.data(), arr.size());
-}
+// std::wstring ConvertToCpp<std::wstring, false, false, false>::operator()(jl_value_t* jstr) const
+// {
+//   static const JuliaFunction wstring_to_cpp("wstring_to_cpp", "CxxWrap");
+//   ArrayRef<wchar_t> arr((jl_array_t*)wstring_to_cpp(jstr));
+//   return std::wstring(arr.data(), arr.size());
+// }
 
 static constexpr const char* dt_prefix = "__cxxwrap_dt_";
 
@@ -242,6 +249,27 @@ JLCXX_API jl_datatype_t* new_datatype(jl_sym_t *name,
     return dt;
   }
 
+  // std::stringstream dt_def;
+  // if(mutabl)
+  // {
+  //   dt_def << "mutable ";
+  // }
+  // dt_def << "struct " << symbol_name(name);
+  // const size_t nparams = jl_svec_len(parameters);
+  // if(nparams != 0)
+  // {
+  //   dt_def << "{";
+  //   for(size_t i = 0; i != nparams; ++i)
+  //   {
+  //     dt_def << julia_type_name(jl_svecref(parameters,i)) << ",";
+  //   }
+  //   dt_def << "}";
+  // }
+
+  // dt_def << " <: " << julia_type_name(super);
+
+  // std::cout << "adding type " << dt_def.str() << std::endl;
+
   dt = jl_new_datatype(name, module, super, parameters, fnames, ftypes, abstract, mutabl, ninitialized);
   set_internal_constant(module, dt, dt_prefix + symbol_name(name));
   return dt;
@@ -262,6 +290,58 @@ JLCXX_API jl_datatype_t* new_bitstype(jl_sym_t *name,
   dt = jl_new_primitivetype((jl_value_t*)name, module, super, parameters, nbits);
   set_internal_constant(module, dt, dt_prefix + symbol_name(name));
   return dt;
+}
+
+namespace detail
+{
+  template<typename T>
+  struct AddIntegerTypes
+  {
+  };
+
+  template<typename T, typename... OtherTypesT>
+  struct AddIntegerTypes<ParameterList<T, OtherTypesT...>>
+  {
+    void operator()(const std::string& basename, const std::string& prefix)
+    {
+      if(has_julia_type<T>())
+      {
+        return;
+      }
+      std::stringstream tname;
+      tname << prefix << (std::is_unsigned<T>::value ? "U" : "") << basename;
+      tname << sizeof(T)*8;
+      jl_module_t* mod = prefix.empty() ? jl_base_module : g_cxxwrap_module;
+      set_julia_type<T>((jl_datatype_t*)julia_type(tname.str(), mod));
+      AddIntegerTypes<ParameterList<OtherTypesT...>>()(basename, prefix);
+    }
+  };
+
+  template<>
+  struct AddIntegerTypes<ParameterList<>>
+  {
+    void operator()(const std::string&, const std::string&)
+    {
+    }
+  };
+}
+
+JLCXX_API void register_core_types()
+{
+  set_julia_type<void>(jl_void_type);
+  set_julia_type<float>(jl_float32_type);
+  set_julia_type<double>(jl_float64_type);
+  set_julia_type<bool>((jl_datatype_t*)julia_type("CxxBool", g_cxxwrap_module));
+  set_julia_type<char>((jl_datatype_t*)julia_type("CxxChar", g_cxxwrap_module));
+  set_julia_type<unsigned char>((jl_datatype_t*)julia_type("CxxUChar", g_cxxwrap_module));
+  set_julia_type<wchar_t>((jl_datatype_t*)julia_type("CxxWchar", g_cxxwrap_module));
+  
+  jlcxx::detail::AddIntegerTypes<fundamental_int_types>()("Int", "");
+  jlcxx::detail::AddIntegerTypes<fixed_int_types>()("Int", "Cxx");
+  set_julia_type<long>((jl_datatype_t*)julia_type("CxxLong", g_cxxwrap_module));
+  set_julia_type<unsigned long>((jl_datatype_t*)julia_type("CxxULong", g_cxxwrap_module));
+
+  set_julia_type<ObjectIdDict>((jl_datatype_t*)julia_type("IdDict", jl_base_module));
 }
 
 }

@@ -5,6 +5,7 @@
 
 #include "jlcxx/jlcxx.hpp"
 #include "jlcxx/functions.hpp"
+#include "jlcxx/stl.hpp"
 
 namespace cpp_types
 {
@@ -37,14 +38,14 @@ struct DoubleData
 struct World
 {
   World(const std::string& message = "default hello") : msg(message){}
-  World(int_t) : msg("NumberedWorld") {}
+  World(jlcxx::cxxint_t) : msg("NumberedWorld") {}
   void set(const std::string& msg) { this->msg = msg; }
   const std::string& greet() const { return msg; }
   std::string msg;
   ~World() { std::cout << "Destroying World with message " << msg << std::endl; }
 };
 
-struct Array {};
+struct Array { Array() {} };
 
 struct NonCopyable
 {
@@ -55,6 +56,7 @@ struct NonCopyable
 
 struct AConstRef
 {
+  AConstRef() {}
   int value() const
   {
     return 42;
@@ -73,6 +75,8 @@ struct ReturnConstRef
 
 struct CallOperator
 {
+  CallOperator() {}
+
   int operator()() const
   {
     return 43;
@@ -95,12 +99,9 @@ struct JuliaTestType {
   double a;
   double b;
 };
-void call_testype_function()
+void call_testtype_function()
 {
-  JuliaTestType A = {2., 3.};
-  jl_value_t* result = jl_new_struct_uninit((jl_datatype_t*)jlcxx::julia_type("JuliaTestType"));
-  *reinterpret_cast<JuliaTestType*>(result) = A;
-  jlcxx::JuliaFunction("julia_test_func")(result);
+  jlcxx::JuliaFunction("julia_test_func")(jlcxx::box<JuliaTestType>(JuliaTestType({2.0, 3.0}), jlcxx::julia_type("JuliaTestType")));
 }
 
 enum MyEnum
@@ -119,40 +120,44 @@ struct Foo
   std::vector<double> data;
 };
 
-struct NullableStruct {};
-
-struct ImmutableBits
-{
-  double a;
-  double b;
-};
+struct NullableStruct { NullableStruct() {} };
 
 } // namespace cpp_types
 
 namespace jlcxx
 {
-  template<> struct IsBits<cpp_types::MyEnum> : std::true_type {};
+  template<> struct IsMirroredType<cpp_types::DoubleData> : std::false_type { };
   template<typename T> struct IsSmartPointerType<cpp_types::MySmartPointer<T>> : std::true_type { };
   template<typename T> struct ConstructorPointerType<cpp_types::MySmartPointer<T>> { typedef std::shared_ptr<T> type; };
-
-  template<> struct IsImmutable<cpp_types::ImmutableBits> : std::true_type {};
-  template<> struct IsBits<cpp_types::ImmutableBits> : std::true_type {};
 }
 
 JLCXX_MODULE define_julia_module(jlcxx::Module& types)
 {
   using namespace cpp_types;
 
-  types.method("call_testype_function", call_testype_function);
+  types.method("call_testtype_function", call_testtype_function);
 
   types.add_type<DoubleData>("DoubleData");
 
   types.add_type<World>("World")
     .constructor<const std::string&>()
-    .constructor<int_t>(false) // no finalizer
+    .constructor<jlcxx::cxxint_t>(false) // no finalizer
     .method("set", &World::set)
-    .method("greet", &World::greet)
+    .method("greet_cref", &World::greet)
     .method("greet_lambda", [] (const World& w) { return w.greet(); } );
+
+  types.method("test_unbox", [] ()
+  {
+    std::vector<bool> results;
+    results.push_back(jlcxx::unbox<int>(jlcxx::JuliaFunction("return_int")()) == 3);
+    results.push_back(*jlcxx::unbox<double*>(jlcxx::JuliaFunction("return_ptr_double")()) == 4.0);
+    results.push_back(jlcxx::unbox<World>(jlcxx::JuliaFunction("return_world")()).greet() == "returned_world");
+    results.push_back(jlcxx::unbox<World*>(jlcxx::JuliaFunction("return_world")())->greet() == "returned_world");
+    results.push_back(jlcxx::unbox<World&>(jlcxx::JuliaFunction("return_world")()).greet() == "returned_world");
+    results.push_back(jlcxx::unbox<World*>(jlcxx::JuliaFunction("return_world_ptr")())->greet() == "returned_world_ptr");
+    results.push_back(jlcxx::unbox<World&>(jlcxx::JuliaFunction("return_world_ref")()).greet() == "returned_world_ref");
+    return results;
+  });
 
   types.add_type<Array>("Array");
 
@@ -160,7 +165,7 @@ JLCXX_MODULE define_julia_module(jlcxx::Module& types)
   {
     return new World("factory hello");
   });
-
+  
   types.method("shared_world_factory", []() -> const std::shared_ptr<World>
   {
     return std::shared_ptr<World>(new World("shared factory hello"));
@@ -170,6 +175,7 @@ JLCXX_MODULE define_julia_module(jlcxx::Module& types)
   {
     return w->greet();
   });
+
   types.method("greet_shared_const", [](const std::shared_ptr<const World>& w)
   {
     return w->greet();
@@ -185,6 +191,8 @@ JLCXX_MODULE define_julia_module(jlcxx::Module& types)
   {
     target.reset(new World(message));
   });
+
+  jlcxx::add_smart_pointer<MySmartPointer>(types, "MySmartPointer");
 
   types.method("smart_world_factory", []()
   {
@@ -215,13 +223,13 @@ JLCXX_MODULE define_julia_module(jlcxx::Module& types)
   types.method("boxed_world_factory", []()
   {
     static World w("boxed world");
-    return jlcxx::box(w);
+    return jlcxx::box<World&>(w);
   });
 
   types.method("boxed_world_pointer_factory", []()
   {
     static World w("boxed world pointer");
-    return jlcxx::box(&w);
+    return jlcxx::box<World*>(&w);
   });
 
   types.method("world_ref_factory", []() -> World&
@@ -240,7 +248,7 @@ JLCXX_MODULE define_julia_module(jlcxx::Module& types)
 
   types.add_type<ConstPtrConstruct>("ConstPtrConstruct")
     .constructor<const World*>()
-    .method("greet", &ConstPtrConstruct::greet);
+    .method("greet_cref", &ConstPtrConstruct::greet);
 
   // Enum
   types.add_bits<MyEnum>("MyEnum", jlcxx::julia_type("CppEnum"));
@@ -258,7 +266,7 @@ JLCXX_MODULE define_julia_module(jlcxx::Module& types)
   {
     for(jl_value_t* v : farr)
     {
-      const Foo& f = *jlcxx::unbox_wrapped_ptr<Foo>(v);
+      const Foo& f = jlcxx::unbox<Foo&>(v);
       std::wcout << f.name << ":";
       for(const double d : f.data)
       {
@@ -272,6 +280,14 @@ JLCXX_MODULE define_julia_module(jlcxx::Module& types)
   types.method("return_ptr", [] () { return new NullableStruct; });
   types.method("return_null", [] () { return static_cast<NullableStruct*>(nullptr); });
 
-  jlcxx::static_type_mapping<ImmutableBits>::set_julia_type((jl_datatype_t*)jlcxx::julia_type("ImmutableBits"));
-  types.method("increment_immutable", [] (const ImmutableBits& x) { return ImmutableBits({x.a+1.0, x.b+1.0}); });
+  types.method("greet_vector", [] (const std::vector<World>& v)
+  {
+    std::stringstream messages;
+    for(const World& w : v)
+    {
+      messages << w.greet() << " ";
+    }
+    const std::string result = messages.str();
+    return result.substr(0,result.size()-1);
+  });
 }

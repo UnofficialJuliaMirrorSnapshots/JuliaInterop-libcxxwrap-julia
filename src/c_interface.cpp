@@ -24,6 +24,8 @@ JLCXX_API void initialize(jl_value_t* julia_module, jl_value_t* cppfunctioninfo_
   g_protect_from_gc = reinterpret_cast<protect_f_t>(gc_protect_f);
   g_unprotect_from_gc = reinterpret_cast<protect_f_t>(gc_unprotect_f);
 
+  register_core_types();
+
   InitHooks::instance().run_hooks();
 }
 
@@ -80,24 +82,23 @@ JLCXX_API jl_array_t* get_module_functions(jl_module_t* jlmod)
   const jlcxx::Module& module = registry().get_module(jlmod);
   module.for_each_function([&](FunctionWrapperBase& f)
   {
-    Array<jl_datatype_t*> arg_types_array, ref_arg_types_array;
+    Array<jl_datatype_t*> arg_types_array;
     jl_value_t* boxed_f = nullptr;
     jl_value_t* boxed_thunk = nullptr;
-    JL_GC_PUSH4(arg_types_array.gc_pointer(), ref_arg_types_array.gc_pointer(), &boxed_f, &boxed_thunk);
+    JL_GC_PUSH3(arg_types_array.gc_pointer(), &boxed_f, &boxed_thunk);
 
     fill_types_vec(arg_types_array, f.argument_types());
-    fill_types_vec(ref_arg_types_array, f.reference_argument_types());
 
-    boxed_f = jlcxx::box(f.pointer_index());
-    boxed_thunk = jlcxx::box(f.thunk_index());
+    boxed_f = jlcxx::box<cxxint_t>(f.pointer_index());
+    boxed_thunk = jlcxx::box<cxxint_t>(f.thunk_index());
 
     function_array.push_back(jl_new_struct(g_cppfunctioninfo_type,
       f.name(),
       arg_types_array.wrapped(),
-      ref_arg_types_array.wrapped(),
       f.return_type(),
       boxed_f,
-      boxed_thunk
+      boxed_thunk,
+      f.override_module()
     ));
 
     JL_GC_POP();
@@ -118,14 +119,9 @@ jl_array_t* convert_type_vector(const std::vector<jl_datatype_t*> types_vec)
   return datatypes.wrapped();
 }
 
-JLCXX_API jl_array_t* get_reference_types(jl_module_t* jlmod)
+JLCXX_API jl_array_t* get_box_types(jl_module_t* jlmod)
 {
-  return convert_type_vector(registry().get_module(jlmod).reference_types());
-}
-
-JLCXX_API jl_array_t* get_allocated_types(jl_module_t* jlmod)
-{
-  return convert_type_vector(registry().get_module(jlmod).allocated_types());
+  return convert_type_vector(registry().get_module(jlmod).box_types());
 }
 
 JLCXX_API const char* version_string()
