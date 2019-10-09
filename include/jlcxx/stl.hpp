@@ -73,10 +73,9 @@ void wrap_common(TypeWrapperT& wrapped)
 {
   using WrappedT = typename TypeWrapperT::type;
   using T = typename WrappedT::value_type;
+  wrapped.module().set_override_module(StlWrappers::instance().module());
   wrapped.method("cppsize", &WrappedT::size);
-  wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
   wrapped.method("resize", [] (WrappedT& v, const cxxint_t s) { v.resize(s); });
-  wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
   wrapped.method("append", [] (WrappedT& v, jlcxx::ArrayRef<T> arr)
   {
     const std::size_t addedlen = arr.size();
@@ -86,7 +85,7 @@ void wrap_common(TypeWrapperT& wrapped)
       v.push_back(arr[i]);
     }
   });
-  wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
+  wrapped.module().unset_override_module();
 }
 
 template<typename T>
@@ -98,14 +97,12 @@ struct WrapVectorImpl
     using WrappedT = std::vector<T>;
     
     wrap_common(wrapped);
+    wrapped.module().set_override_module(StlWrappers::instance().module());
     wrapped.method("push_back", static_cast<void (WrappedT::*)(const T&)>(&WrappedT::push_back));
-    wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
     wrapped.method("cxxgetindex", [] (const WrappedT& v, cxxint_t i) -> typename WrappedT::const_reference { return v[i-1]; });
-    wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
     wrapped.method("cxxgetindex", [] (WrappedT& v, cxxint_t i) -> typename WrappedT::reference { return v[i-1]; });
-    wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
     wrapped.method("cxxsetindex!", [] (WrappedT& v, const T& val, cxxint_t i) { v[i-1] = val; });
-    wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
+    wrapped.module().unset_override_module();
   }
 };
 
@@ -118,12 +115,11 @@ struct WrapVectorImpl<bool>
     using WrappedT = std::vector<bool>;
 
     wrap_common(wrapped);
+    wrapped.module().set_override_module(StlWrappers::instance().module());
     wrapped.method("push_back", [] (WrappedT& v, const bool val) { v.push_back(val); });
-    wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
     wrapped.method("cxxgetindex", [] (const WrappedT& v, cxxint_t i) { return bool(v[i-1]); });
-    wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
     wrapped.method("cxxsetindex!", [] (WrappedT& v, const bool val, cxxint_t i) { v[i-1] = val; });
-    wrapped.module().last_function().set_override_module(StlWrappers::instance().module());
+    wrapped.module().unset_override_module();
   }
 };
 
@@ -147,25 +143,22 @@ inline void apply_stl(jlcxx::Module& mod)
 }
 
 template<typename T>
-struct dynamic_type_mapping<std::vector<T>>
+struct julia_type_factory<std::vector<T>>
 {
-  static constexpr bool storing_dt = true;
   using MappedT = std::vector<T>;
 
   static inline jl_datatype_t* julia_type()
   {
-    if(!has_julia_type<MappedT>())
+    assert(!has_julia_type<MappedT>());
+    assert(registry().has_current_module());
+    jl_datatype_t* jltype = ::jlcxx::julia_type<T>();
+    Module& curmod = registry().current_module();
+    if(jltype->name->module != curmod.julia_module())
     {
-      assert(registry().has_current_module());
-      jl_datatype_t* jltype = ::jlcxx::julia_type<T>();
-      Module& curmod = registry().current_module();
-      if(jltype->name->module != curmod.julia_module())
-      {
-        const std::string tname = julia_type_name(jltype);
-        throw std::runtime_error("Type for std::vector<" + tname + "> must be defined in the same module as " + tname);
-      }
-      stl::apply_stl<T>(curmod);
+      const std::string tname = julia_type_name(jltype);
+      throw std::runtime_error("Type for std::vector<" + tname + "> must be defined in the same module as " + tname);
     }
+    stl::apply_stl<T>(curmod);
     assert(has_julia_type<MappedT>());
     return JuliaTypeCache<MappedT>::julia_type();
   }

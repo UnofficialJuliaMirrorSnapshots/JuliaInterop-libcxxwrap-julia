@@ -63,6 +63,8 @@ struct ConvertToBase
 template<template<typename...> class PtrT, typename T>
 struct ConvertToBase<PtrT<T>>
 {
+  using SuperPtrT = PtrT<supertype<T>>;
+
   static PtrT<supertype<T>> apply(PtrT<T> &smart_ptr)
   {
     return PtrT<supertype<T>>(smart_ptr);
@@ -106,6 +108,7 @@ struct SmartPtrMethods<PtrT<PointeeT, ExtraArgs...>, OtherPtrT>
 
   static void apply(Module& mod)
   {
+    assert(has_julia_type<WrappedT>());
     ConditionalConstructFromOther<!std::is_same<OtherPtrT, NoSmartOther>::value>::apply(mod);
     ConditionalCastToBase<!std::is_same<PointeeT,supertype<PointeeT>>::value && !std::is_same<std::unique_ptr<PointeeT>, WrappedT>::value>::apply(mod);
   }
@@ -113,18 +116,13 @@ struct SmartPtrMethods<PtrT<PointeeT, ExtraArgs...>, OtherPtrT>
 
 }
 
-// Cache the Julia datatype and module associated with a given C++ smart pointer type
-template<template<typename...> class T>
-std::unique_ptr<TypeWrapper1>& julia_smartpointer_type()
-{
-  static std::unique_ptr<TypeWrapper1> wrapper;
-  return wrapper;
-}
+JLCXX_API void set_smartpointer_type(const type_hash_t& hash, TypeWrapper1* new_wrapper);
+JLCXX_API TypeWrapper1* get_smartpointer_type(const type_hash_t& hash);
 
 template<template<typename...> class T>
 TypeWrapper1 smart_ptr_wrapper(Module& module)
 {
-  TypeWrapper1* stored_wrapper = smartptr::julia_smartpointer_type<T>().get();
+  static TypeWrapper1* stored_wrapper = get_smartpointer_type(type_hash<T<int>>());
   if(stored_wrapper == nullptr)
   {
     std::cerr << "Smart pointer type has no wrapper" << std::endl;
@@ -142,7 +140,6 @@ struct WrapSmartPointer
     
     wrapped.module().method("__cxxwrap_smartptr_dereference", DereferenceSmartPointer<WrappedT>::apply);
     wrapped.module().last_function().set_override_module(get_cxxwrap_module());
-    detail::SmartPtrMethods<WrappedT, typename ConstructorPointerType<WrappedT>::type>::apply(wrapped.module());
   }
 };
 
@@ -157,8 +154,9 @@ inline void apply_smart_combination(Module& mod)
 template<template<typename...> class T>
 TypeWrapper1& add_smart_pointer(Module& mod, const std::string& name)
 {
-  smartptr::julia_smartpointer_type<T>().reset(new TypeWrapper1(mod.add_type<Parametric<TypeVar<1>>>(name, julia_type("SmartPointer", get_cxxwrap_module()))));
-  return *(smartptr::julia_smartpointer_type<T>());
+  TypeWrapper1* tw = new TypeWrapper1(mod.add_type<Parametric<TypeVar<1>>>(name, julia_type("SmartPointer", get_cxxwrap_module())));
+  smartptr::set_smartpointer_type(type_hash<T<int>>(), tw);
+  return *tw;
 }
 
 struct SmartPointerTrait {};
@@ -169,26 +167,57 @@ struct MappingTrait<T, typename std::enable_if<IsSmartPointerType<T>::value>::ty
   using type = CxxWrappedTrait<SmartPointerTrait>;
 };
 
-template<template<typename...> class PtrT, typename T, typename... OtherParamsT>
-struct dynamic_type_mapping<PtrT<T, OtherParamsT...>, CxxWrappedTrait<SmartPointerTrait>>
+namespace detail
 {
-  static constexpr bool storing_dt = true;
-  using MappedT = PtrT<T, OtherParamsT...>;
 
+template<typename T>
+struct apply_smart_ptr_type
+{
+};
+
+template<template<typename...> class PtrT, typename T, typename... OtherParamsT>
+struct apply_smart_ptr_type<PtrT<T, OtherParamsT...>>
+{
+  void operator()(Module& curmod)
+  {
+    smartptr::smart_ptr_wrapper<PtrT>(curmod).template apply<PtrT<T, OtherParamsT...>>(smartptr::WrapSmartPointer());
+  }
+};
+
+template<typename T>
+struct get_pointee
+{
+};
+
+template<template<typename...> class PtrT, typename T, typename... OtherParamsT>
+struct get_pointee<PtrT<T, OtherParamsT...>>
+{
+  using type = T;
+};
+
+}
+
+template<typename MappedT>
+struct julia_type_factory<MappedT, CxxWrappedTrait<SmartPointerTrait>>
+{
   static inline jl_datatype_t* julia_type()
   {
-    if(!has_julia_type<MappedT>())
+    using PointeeT = typename detail::get_pointee<MappedT>::type;
+    if constexpr(!std::is_same<supertype<PointeeT>, PointeeT>::value)
     {
-      assert(registry().has_current_module());
-      jl_datatype_t* jltype = ::jlcxx::julia_type<T>();
-      Module& curmod = registry().current_module();
-      if(jltype->name->module != curmod.julia_module())
-      {
-        const std::string tname = julia_type_name(jltype);
-        throw std::runtime_error("Smart pointer type with parameter " + tname + " must be defined in the same module as " + tname);
-      }
-      smartptr::smart_ptr_wrapper<PtrT>(curmod).template apply<MappedT>(smartptr::WrapSmartPointer());
+      create_if_not_exists<typename smartptr::ConvertToBase<MappedT>::SuperPtrT>();
     }
+    assert(!has_julia_type<MappedT>());
+    assert(registry().has_current_module());
+    jl_datatype_t* jltype = ::jlcxx::julia_type<PointeeT>();
+    Module& curmod = registry().current_module();
+    if(jltype->name->module != curmod.julia_module())
+    {
+      const std::string tname = julia_type_name(jltype);
+      throw std::runtime_error("Smart pointer type with parameter " + tname + " must be defined in the same module as " + tname);
+    }
+    detail::apply_smart_ptr_type<MappedT>()(curmod);
+    smartptr::detail::SmartPtrMethods<MappedT, typename ConstructorPointerType<MappedT>::type>::apply(curmod);
     assert(has_julia_type<MappedT>());
     return JuliaTypeCache<MappedT>::julia_type();
   }

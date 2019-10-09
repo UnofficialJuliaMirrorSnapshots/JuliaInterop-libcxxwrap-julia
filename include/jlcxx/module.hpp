@@ -149,7 +149,7 @@ class JLCXX_API Module;
 class JLCXX_API FunctionWrapperBase
 {
 public:
-  FunctionWrapperBase(Module* mod, jl_datatype_t* return_type) : m_module(mod), m_return_type(return_type)
+  FunctionWrapperBase(Module* mod, jl_datatype_t* return_type) : m_name(nullptr), m_module(mod), m_return_type(return_type)
   {
   }
 
@@ -189,7 +189,7 @@ protected:
 
   void set_pointer_indices();
 private:
-  jl_value_t* m_name;
+  jl_value_t* m_name = nullptr;
   Module* m_module;
   jl_datatype_t* m_return_type = nullptr;
 
@@ -209,6 +209,7 @@ public:
 
   FunctionWrapper(Module* mod, const functor_t &function) : FunctionWrapperBase(mod, julia_return_type<R>()), m_function(function)
   {
+    (create_if_not_exists<Args>(), ...);
     set_pointer_indices();
   }
 
@@ -241,6 +242,7 @@ public:
 
   FunctionPtrWrapper(Module* mod, R (*f)(Args...)) : FunctionWrapperBase(mod, julia_return_type<R>()), m_function(f)
   {
+    (create_if_not_exists<Args>(), ...);
     set_pointer_indices();
   }
 
@@ -283,11 +285,12 @@ struct GetJlType
 {
   jl_datatype_t* operator()() const
   {
-    try
+    using uncref_t = remove_const_ref<T>;
+    if(has_julia_type<uncref_t>())
     {
       return julia_base_type<remove_const_ref<T>>();
     }
-    catch(...)
+    else
     {
       // The assumption here is that unmapped types are not needed, i.e. in default argument lists
       return nullptr;
@@ -480,6 +483,10 @@ public:
     assert(f != nullptr);
     m_functions.push_back(std::shared_ptr<FunctionWrapperBase>(f));
     assert(m_functions.back() != nullptr);
+    if(m_override_module != nullptr)
+    {
+      m_functions.back()->set_override_module(m_override_module);
+    }
   }
 
   /// Define a new function
@@ -621,6 +628,9 @@ public:
 
   cxxint_t store_pointer(void* ptr);
 
+  inline void set_override_module(jl_module_t* mod) { m_override_module = mod; }
+  inline void unset_override_module() { m_override_module = nullptr; }
+
 private:
 
   template<typename T>
@@ -655,6 +665,7 @@ private:
   }
 
   jl_module_t* m_jl_mod;
+  jl_module_t* m_override_module = nullptr;
   ArrayRef<void*> m_pointer_array;
   std::vector<std::shared_ptr<FunctionWrapperBase>> m_functions;
   std::map<std::string, jl_value_t*> m_jl_constants;
@@ -863,6 +874,39 @@ namespace detail
   {
     delete to_delete;
   }
+
+  template<typename T>
+  struct CreateParameterType
+  {
+    inline void operator()()
+    {
+      create_if_not_exists<T>();
+    }
+  };
+
+  template<typename T, T v>
+  struct CreateParameterType<std::integral_constant<T, v>>
+  {
+    inline void operator()()
+    {
+    }
+  };
+
+  template<int N, typename T, std::size_t I>
+  inline void create_parameter_type()
+  {
+    if(I < N)
+    {
+      CreateParameterType<T>()();
+    }
+  }
+
+  template<int N, typename... ParametersT, std::size_t... Indices>
+  void create_parameter_types(ParameterList<ParametersT...>, std::index_sequence<Indices...>)
+  {
+    (create_parameter_type<N, ParametersT,Indices>(), ...);
+  }
+
 }
 
 template<typename T>
@@ -911,6 +955,7 @@ public:
   TypeWrapper<T>& method(const std::string& name, R(CT::*f)(ArgsT...))
   {
     m_module.method(name, [f](T& obj, ArgsT... args) -> R { return (obj.*f)(args...); } );
+    m_module.method(name, [f](T* obj, ArgsT... args) -> R { return ((*obj).*f)(args...); } );
     return *this;
   }
 
@@ -919,6 +964,7 @@ public:
   TypeWrapper<T>& method(const std::string& name, R(CT::*f)(ArgsT...) const)
   {
     m_module.method(name, [f](const T& obj, ArgsT... args) -> R { return (obj.*f)(args...); } );
+    m_module.method(name, [f](const T* obj, ArgsT... args) -> R { return ((*obj).*f)(args...); } );
     return *this;
   }
 
@@ -986,12 +1032,16 @@ private:
   template<typename AppliedT, typename FunctorT>
   int apply_internal(FunctorT&& apply_ftor)
   {
-    static_assert(parameter_list<AppliedT>::nb_parameters != 0, "No parameters found when applying type. Specialize jlcxx::BuildParameterList for your combination of type and non-type parameters.");
-    static_assert(parameter_list<AppliedT>::nb_parameters >= parameter_list<T>::nb_parameters, "Parametric type applied to wrong number of parameters.");
+    static constexpr int nb_julia_parameters = parameter_list<T>::nb_parameters;
+    static constexpr int nb_cpp_parameters = parameter_list<AppliedT>::nb_parameters;
+    static_assert(nb_cpp_parameters != 0, "No parameters found when applying type. Specialize jlcxx::BuildParameterList for your combination of type and non-type parameters.");
+    static_assert(nb_cpp_parameters >= nb_julia_parameters, "Parametric type applied to wrong number of parameters.");
     const bool is_abstract = jl_is_abstracttype(m_dt);
 
-    jl_datatype_t* app_dt = (jl_datatype_t*)apply_type((jl_value_t*)m_dt, parameter_list<AppliedT>()(parameter_list<T>::nb_parameters));
-    jl_datatype_t* app_box_dt = (jl_datatype_t*)apply_type((jl_value_t*)m_box_dt, parameter_list<AppliedT>()(parameter_list<T>::nb_parameters));
+    detail::create_parameter_types<nb_julia_parameters>(parameter_list<AppliedT>(), std::make_index_sequence<nb_cpp_parameters>());
+
+    jl_datatype_t* app_dt = (jl_datatype_t*)apply_type((jl_value_t*)m_dt, parameter_list<AppliedT>()(nb_julia_parameters));
+    jl_datatype_t* app_box_dt = (jl_datatype_t*)apply_type((jl_value_t*)m_box_dt, parameter_list<AppliedT>()(nb_julia_parameters));
 
     set_julia_type<AppliedT>(app_box_dt);
     m_module.add_default_constructor<AppliedT>(DefaultConstructible<AppliedT>(), app_dt);
